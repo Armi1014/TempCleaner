@@ -1,105 +1,99 @@
-<<<<<<< HEAD
 @echo off
+setlocal EnableExtensions
 
-:: Check for admin privileges
-net session >nul 2>&1
-if %errorLevel% neq 0 (
-    echo Requesting administrative privileges...
-    powershell -Command "Start-Process -Verb runAs -FilePath '%~f0'"
-    exit /b
-)
-
-:: Get the directory of the batch file
+rem =========================================================
+rem Setup logging
+rem =========================================================
 set "logFile=%~dp0cleanup_log.txt"
 
-:: Start Logging
-echo Cleanup started... > "%logFile%"
+echo Cleanup started at %date% %time% >"%logFile%"
+echo Running as user: %USERNAME%>>"%logFile%"
+echo ---------------------------------------->>"%logFile%"
 
-:: Function to delete files in a folder and log the action
-call :DeleteFiles "%temp%" "User Temp Files"
-call :DeleteFiles "C:\Windows\Temp" "System Temp Files"
-call :DeleteFiles "C:\Windows\SoftwareDistribution\Download" "Windows Update Cache"
-call :DeleteFiles "C:\Windows\Minidump" "Memory Dumps"
-call :DeleteFiles "C:\Users\%username%\AppData\Local\Microsoft\Windows\INetCache" "Edge/IE Cache"
+echo Cleanup started at %date% %time%
+echo(
 
-:: Ask before deleting Explorer cache
-echo Do you want to clear the Explorer thumbnail cache? (This may restart Explorer) [Y/N]
-set /p choice=
-if /i "%choice%"=="Y" (
-    taskkill /f /im explorer.exe >nul 2>&1
-    call :DeleteFiles "C:\Users\%username%\AppData\Local\Microsoft\Windows\Explorer" "Thumbnail Cache"
-    start explorer.exe
-)
+rem =========================================================
+rem Cleanup targets
+rem =========================================================
+call :DeleteFolder "%TEMP%" "User Temp Files"
+call :DeleteFolder "C:\Windows\Temp" "System Temp Files"
+call :DeleteFolder "C:\Windows\SoftwareDistribution\Download" "Windows Update Cache"
+call :DeleteFolder "C:\Windows\Minidump" "Memory Dumps"
+call :DeleteFolder "%LOCALAPPDATA%\Microsoft\Windows\INetCache" "Edge/IE Cache"
 
-:: Exit
-echo Cleanup completed. >> "%logFile%"
+echo(
+choice /C YN /M "Do you want to clear the Explorer thumbnail cache? (This may restart Explorer)"
+if errorlevel 2 goto SkipThumbs
+
+echo(
+echo Stopping Explorer...
+taskkill /f /im explorer.exe >nul 2>&1
+call :DeleteFolder "%LOCALAPPDATA%\Microsoft\Windows\Explorer" "Thumbnail Cache"
+echo Restarting Explorer...
+start explorer.exe
+
+:SkipThumbs
+echo Cleanup completed at %date% %time%>>"%logFile%"
+echo(
 echo Cleanup completed. See cleanup_log.txt for details.
 pause
+endlocal
 exit /b
 
-:: Function to delete files in a folder and log the action
-:DeleteFiles
-set "folder=%1"
-set "description=%2"
 
-echo Cleaning %description%...
-if exist "%folder%" (
-    echo %description% - Files in "%folder%": >> "%logFile%"
-    dir /s /b "%folder%\*" >> "%logFile%" 2>nul
-    del /s /f /q "%folder%\*" >nul 2>&1
-    if %errorLevel% equ 0 (
-        echo %description% deleted successfully. >> "%logFile%"
-    ) else (
-        echo Failed to delete files in %description%. >> "%logFile%"
-    )
-) else (
-    echo %description% folder does not exist. >> "%logFile%"
-)
-exit /b
-=======
-@echo off
+rem =========================================================
+rem Subroutine: DeleteFolder <folder> <description>
+rem =========================================================
+:DeleteFolder
+set "folder=%~1"
+set "desc=%~2"
 
-:: Check for admin privileges
-net session >nul 2>&1
-if %errorLevel% neq 0 (
-    echo Requesting administrative privileges...
-    powershell -Command "Start-Process -Verb runAs -FilePath '%~f0'"
-    exit /b
-)
+rem Empty path check
+if "%folder%"=="" goto DF_Empty
 
-:: Function to delete files in a folder and log the action
-call :DeleteFiles "%temp%" "User Temp Files"
-call :DeleteFiles "C:\Windows\Temp" "System Temp Files"
-call :DeleteFiles "C:\Windows\SoftwareDistribution\Download" "Windows Update Cache"
-call :DeleteFiles "C:\Users\%username%\AppData\Local\Microsoft\Windows\Explorer" "Thumbnail Cache"
-call :DeleteFiles "C:\Windows\Minidump" "Memory Dumps"
-call :DeleteFiles "C:\Users\%username%\AppData\Local\Microsoft\Windows\INetCache" "Edge/IE Cache"
+rem Block dangerous roots
+if /I "%folder%"=="\" goto DF_Danger
+if /I "%folder%"=="C:\" goto DF_Danger
+if /I "%folder%"=="C:" goto DF_Danger
 
-:: Exit
-echo Cleanup completed.
-pause
-exit /b
+echo(
+echo Cleaning %desc%:
+echo   %folder%
 
-:: Function to delete files in a folder and log the action
-:DeleteFiles
-set folder=%1
-set description=%2
+if not exist "%folder%" goto DF_NotExist
 
-echo Cleaning %description%...
-if exist "%folder%" (
-    forfiles /p "%folder%" /s /c "cmd /c del /q @path" >nul 2>&1
-    if %errorLevel% equ 0 (
-        echo %description% deleted successfully.
-    ) else (
-        echo Failed to delete files in %description%.
-        echo Possible reasons:
-        echo - The file is currently in use by another process.
-        echo - The file is locked by the system or has restricted permissions.
-        echo - Insufficient privileges to delete the file.
-        echo - The file may be corrupted or protected.
-    )
-) else (
-    echo %description% folder does not exist.
-)
-exit /b
->>>>>>> 2bb01693755ef860fe27dacb936c1a7f6297d184
+echo [%desc%] Files in "%folder%":>>"%logFile%"
+dir /s /b "%folder%\*" >>"%logFile%" 2>nul
+
+del /s /f /q "%folder%\*" >nul 2>&1
+set "err=%errorlevel%"
+
+if "%err%"=="0" goto DF_Ok
+
+echo [%desc%] Failed to delete some files (error %err%).>>"%logFile%"
+echo Failed to delete some files.
+goto DF_End
+
+:DF_Ok
+echo [%desc%] Files deleted successfully.>>"%logFile%"
+echo Done.
+goto DF_End
+
+:DF_NotExist
+echo [%desc%] Folder "%folder%" does not exist.>>"%logFile%"
+echo Folder does not exist, skipping.
+goto DF_End
+
+:DF_Empty
+echo Skipping %desc% (empty path).
+echo [%desc%] Skipped: empty path.>>"%logFile%"
+goto DF_End
+
+:DF_Danger
+echo Skipping %desc% (dangerous path: %folder%).
+echo [%desc%] Skipped: dangerous path "%folder%".>>"%logFile%"
+goto DF_End
+
+:DF_End
+goto :EOF
