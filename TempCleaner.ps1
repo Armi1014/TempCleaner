@@ -1,29 +1,24 @@
+<#
+.SYNOPSIS
+  Cleans common Windows temp/cache folders with optional presets.
+.DESCRIPTION
+  Runs a safe cleanup pass for user/system temp locations, with per-run logs
+  and optional thumbnail-cache cleanup. Interactive mode shows a simple menu.
+.EXAMPLE
+  .\TempCleaner.ps1
+#>
 [CmdletBinding()]
-param(
-    [switch]$WhatIf,
-    [switch]$DetailedLog,
-    [switch]$SkipThumbnails,
-    [switch]$IncludeThumbnails,
-    [switch]$Silent,
-    [switch]$DisableNotifications,
-    [switch]$SkipUpdateCheck,
-    [string]$Preset,
-    [string]$LogFile,
-    [string]$ConfigFile
-)
+param()
 
 $script:AppRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $script:LogRoot = Join-Path $script:AppRoot 'logs'
-$script:ConfigPath = if ($ConfigFile) {
-    if ([System.IO.Path]::IsPathRooted($ConfigFile)) { $ConfigFile } else { Join-Path $script:AppRoot $ConfigFile }
-} else {
-    Join-Path $script:AppRoot 'TempCleaner.config.json'
-}
+$script:ConfigPath = Join-Path $script:AppRoot 'TempCleaner.config.json'
 $script:RunTimestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
 $script:Version = [version]'0.3.0'
 $script:DefaultUpdateFeed = "https://raw.githubusercontent.com/ardai/TempCleaner/main/version.json"
 $script:RunStats = [System.Collections.Generic.List[pscustomobject]]::new()
 $script:ActiveLogFile = $null
+$script:IsSilent = $false
 
 function Write-Log {
     param(
@@ -36,6 +31,28 @@ function Write-Log {
     }
     $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
     Add-Content -Path $script:ActiveLogFile -Value "[$timestamp] $Message"
+}
+
+function Write-Ui {
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Message,
+        [ConsoleColor]$Color,
+        [switch]$NoNewline,
+        [switch]$VerboseOnly
+    )
+    if ($script:IsSilent) { return }
+    if ($VerboseOnly) {
+        Write-Verbose $Message
+        return
+    }
+    $writeParams = @{}
+    if ($PSBoundParameters.ContainsKey('Color')) {
+        $writeParams.ForegroundColor = $Color
+    }
+    if ($NoNewline) {
+        $writeParams.NoNewline = $true
+    }
+    Write-Host $Message @writeParams
 }
 
 function Format-Bytes {
@@ -52,16 +69,8 @@ function Format-Bytes {
 }
 
 function Show-Header {
-    $banner = @(
-        "=====================================",
-        "   TempCleaner - PowerShell Edition  ",
-        "   Version $($script:Version.ToString())",
-        "====================================="
-    )
-    foreach ($line in $banner) {
-        Write-Host $line -ForegroundColor Cyan
-    }
-    Write-Host ""
+    Write-Ui ("TempCleaner v{0}" -f $script:Version) -Color Cyan
+    Write-Ui ""
 }
 
 function Test-IsAdministrator {
@@ -76,6 +85,7 @@ function Get-Settings {
         DetailedLog          = $false
         SkipThumbnails       = $true
         IncludeThumbnails    = $false
+        WhatIf               = $false
         Silent               = $false
         DisableNotifications = $false
         Preset               = "Basic"
@@ -109,7 +119,7 @@ function Save-Settings {
             New-Item -ItemType Directory -Path $directory -Force | Out-Null
         }
         $Settings | ConvertTo-Json -Depth 4 | Set-Content -Path $Path -Encoding UTF8
-        Write-Host "Saved defaults to $Path" -ForegroundColor DarkGreen
+        Write-Ui "Saved defaults to $Path" -Color DarkGray
     }
     catch {
         Write-Warning "Unable to persist settings: $($_.Exception.Message)"
@@ -131,7 +141,7 @@ function Get-YesNoResponse {
             '^[Yy]' { return $true }
             '^[Nn]' { return $false }
         }
-        Write-Host "Please enter Y or N." -ForegroundColor Yellow
+        Write-Ui "Please enter Y or N." -Color Yellow
     }
 }
 
@@ -146,49 +156,72 @@ function Set-PresetOptions {
             $Options.SkipThumbnails = $true
             $Options.IncludeThumbnails = $false
             $Options.DisableNotifications = $false
+            $Options.WhatIf = $false
         }
         'full' {
             $Options.DetailedLog = $true
             $Options.SkipThumbnails = $false
             $Options.IncludeThumbnails = $true
             $Options.DisableNotifications = $false
+            $Options.WhatIf = $false
         }
         'custom' { }
         default {
-            Write-Host "Unknown preset '$Name'. Falling back to saved defaults." -ForegroundColor Yellow
+            Write-Ui "Unknown preset '$Name'. Falling back to saved defaults." -Color Yellow
         }
     }
 }
 
+function Copy-Options {
+    param(
+        [Parameter(Mandatory)][pscustomobject]$Source,
+        [Parameter(Mandatory)][pscustomobject]$Target
+    )
+    foreach ($prop in $Source.PSObject.Properties) {
+        $Target.$($prop.Name) = $prop.Value
+    }
+}
+
+function Test-OptionsChanged {
+    param(
+        [Parameter(Mandatory)][pscustomobject]$Current,
+        [Parameter(Mandatory)][pscustomobject]$Saved
+    )
+    foreach ($prop in $Saved.PSObject.Properties) {
+        $name = $prop.Name
+        if ($Current.PSObject.Properties.Name -notcontains $name) { continue }
+        if ($Current.$name -ne $prop.Value) { return $true }
+    }
+    return $false
+}
+
 function Invoke-ModeMenu {
     param(
-        [Parameter(Mandatory)][pscustomobject]$Options
+        [Parameter(Mandatory)][pscustomobject]$Options,
+        [Parameter(Mandatory)][pscustomobject]$SavedOptions
     )
     $presetTable = @(
-        [pscustomobject]@{ Id = 1; Name = "Basic";  Description = "Fast cleanup, skips thumbnail cache, concise logging." },
-        [pscustomobject]@{ Id = 2; Name = "Full";   Description = "Cleans everything (incl. thumbnails) with detailed logging." },
-        [pscustomobject]@{ Id = 3; Name = "Custom"; Description = "Answer prompts to build your own mix of options." },
-        [pscustomobject]@{ Id = 4; Name = "Saved";  Description = "Use saved defaults (`"$($Options.Preset)`")." }
+        [pscustomobject]@{ Id = 1; Name = "Basic";  Description = "Fast cleanup (skip thumbnails)." },
+        [pscustomobject]@{ Id = 2; Name = "Full";   Description = "Everything + thumbnails + detailed log." },
+        [pscustomobject]@{ Id = 3; Name = "Custom"; Description = "Pick options one by one." },
+        [pscustomobject]@{ Id = 4; Name = "Saved";  Description = "Use saved defaults ($($SavedOptions.Preset))." }
     )
 
-    Write-Host ""
-    Write-Host "╔════════════════════════════════════════════╗" -ForegroundColor Cyan
-    Write-Host "║           Cleanup Mode Selection           ║" -ForegroundColor Cyan
-    Write-Host "╚════════════════════════════════════════════╝" -ForegroundColor Cyan
-
+    Write-Ui ""
+    Write-Ui "Cleanup mode" -Color Cyan
     foreach ($row in $presetTable) {
         $label = "{0}. {1,-6} {2}" -f $row.Id, $row.Name, $row.Description
         $color = switch ($row.Name) {
             'Basic' { 'Green' }
             'Full' { 'Yellow' }
             'Custom' { 'Cyan' }
-            'Saved' { 'Gray' }
+            'Saved' { 'DarkGray' }
             default { 'White' }
         }
-        Write-Host ("  {0}" -f $label) -ForegroundColor $color
+        Write-Ui ("  {0}" -f $label) -Color $color
     }
-    Write-Host ""
-    Write-Host "Tip: Press Enter to reuse the saved defaults." -ForegroundColor DarkGray
+    Write-Ui ""
+    Write-Ui "Press Enter to use Saved." -Color DarkGray
 
     do {
         $choice = Read-Host "Select 1-4 (default: 4)"
@@ -201,17 +234,21 @@ function Invoke-ModeMenu {
         '1' { Set-PresetOptions -Name 'basic' -Options $Options; $Options.Preset = 'Basic' }
         '2' { Set-PresetOptions -Name 'full' -Options $Options; $Options.Preset = 'Full' }
         '3' {
-            Write-Host ""
-            Write-Host "--- Custom Mode ---" -ForegroundColor Cyan
-            $Options.DetailedLog = Get-YesNoResponse "Enable detailed logging?"
-            $Options.IncludeThumbnails = Get-YesNoResponse "Always clean thumbnail cache?" $false
+            Write-Ui ""
+            Write-Ui "Custom options" -Color Cyan
+            $Options.DetailedLog = Get-YesNoResponse "Detailed log file?" $Options.DetailedLog
+            $Options.IncludeThumbnails = Get-YesNoResponse "Clean thumbnail cache?" $Options.IncludeThumbnails
             $Options.SkipThumbnails = -not $Options.IncludeThumbnails
-            $Options.DisableNotifications = -not (Get-YesNoResponse "Show desktop notification when finished?" $true)
+            $Options.WhatIf = Get-YesNoResponse "Dry run only (no deletions)?" $Options.WhatIf
+            $Options.DisableNotifications = -not (Get-YesNoResponse "Show completion notification?" (-not $Options.DisableNotifications))
             $Options.Preset = 'Custom'
         }
-        '4' { Write-Host "Using saved defaults ($($Options.Preset))." -ForegroundColor DarkGray }
+        '4' { Copy-Options -Source $SavedOptions -Target $Options }
     }
-    $remember = Get-YesNoResponse "Remember this selection as default?" $false
+    $remember = $false
+    if (Test-OptionsChanged -Current $Options -Saved $SavedOptions) {
+        $remember = Get-YesNoResponse "Remember this selection as default?" $false
+    }
     return [pscustomobject]@{
         Options      = $Options
         SaveDefaults = $remember
@@ -244,7 +281,8 @@ function Show-AsciiProgress {
 
 function Write-TargetSummary {
     param([pscustomobject]$Stats)
-    $size = Format-Bytes -Bytes $Stats.SizeBytes
+    $bytesToShow = if ($Stats.Result -eq 'WhatIf') { $Stats.SizeBytes } elseif ($Stats.FreedBytes -gt 0) { $Stats.FreedBytes } else { $Stats.SizeBytes }
+    $size = Format-Bytes -Bytes $bytesToShow
     $duration = "{0:N1}s" -f $Stats.Duration.TotalSeconds
     $notes = if ($Stats.Notes) { " · $($Stats.Notes)" } else { "" }
     switch ($Stats.Result) {
@@ -255,7 +293,7 @@ function Write-TargetSummary {
         'Failed' { $icon = '[ERR]'; $color = 'Red' }
         default { $icon = '[--]'; $color = 'Gray' }
     }
-    Write-Host ("{0} {1} | {2} files | {3} folders | {4} | {5}{6}" -f $icon, $Stats.Description, $Stats.Files, $Stats.Folders, $size, $duration, $notes) -ForegroundColor $color
+    Write-Ui ("{0} {1} | {2} files | {3} folders | {4} | {5}{6}" -f $icon, $Stats.Description, $Stats.Files, $Stats.Folders, $size, $duration, $notes) -Color $color
 }
 
 function Invoke-UpdateCheck {
@@ -265,22 +303,30 @@ function Invoke-UpdateCheck {
     if ($Options.SkipUpdateCheck) { return }
     if (-not $Options.UpdateFeed) { return }
     try {
-        $response = Invoke-RestMethod -Uri $Options.UpdateFeed -UseBasicParsing -ErrorAction Stop
+        $irmParams = @{
+            Uri         = $Options.UpdateFeed
+            ErrorAction = 'Stop'
+        }
+        if ($PSVersionTable.PSVersion.Major -lt 6) {
+            $irmParams.UseBasicParsing = $true
+        }
+        $response = Invoke-RestMethod @irmParams
         if ($response.version) {
             $remoteVersion = [version]$response.version
             if ($remoteVersion -gt $script:Version) {
-                Write-Host ("Update available! Current {0}, Latest {1}" -f $script:Version, $remoteVersion) -ForegroundColor Yellow
+                Write-Ui ("Update available! Current {0}, Latest {1}" -f $script:Version, $remoteVersion) -Color Yellow
                 if ($response.releaseNotes) {
-                    Write-Host "Release notes: $($response.releaseNotes)" -ForegroundColor Yellow
+                    Write-Ui "Release notes: $($response.releaseNotes)" -Color Yellow
                 }
             }
             else {
-                Write-Host "You are running the latest version." -ForegroundColor DarkGreen
+                Write-Ui "You are running the latest version." -Color DarkGreen -VerboseOnly
             }
         }
     }
     catch {
         Write-Log "Update check failed: $($_.Exception.Message)"
+        Write-Ui "Update check failed (see log for details)." -Color Yellow -VerboseOnly
     }
 }
 
@@ -336,7 +382,7 @@ function Clear-Folder {
     $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
     try {
         if ([string]::IsNullOrWhiteSpace($Path)) {
-            Write-Host "Skipping $Description (empty path)." -ForegroundColor Yellow
+            Write-Ui "Skipping $Description (empty path)." -Color Yellow -VerboseOnly
             Write-Log "${Description}: Skipped (empty path)."
             $stats.Result = "Skipped"
             $stats.Notes = "Empty path"
@@ -345,7 +391,7 @@ function Clear-Folder {
 
         $dangerous = @('\', 'C:\', 'C:')
         if ($dangerous -contains $Path.Trim()) {
-            Write-Host "Skipping $Description (dangerous path: $Path)." -ForegroundColor Red
+            Write-Ui "Skipping $Description (dangerous path: $Path)." -Color Red -VerboseOnly
             Write-Log "${Description}: Skipped dangerous path '$Path'."
             $stats.Result = "Skipped"
             $stats.Notes = "Dangerous path"
@@ -353,16 +399,16 @@ function Clear-Folder {
         }
 
         if (-not (Test-Path -LiteralPath $Path)) {
-            Write-Host "$Description -> folder does not exist, skipping." -ForegroundColor Yellow
+            Write-Ui "Skipping $Description (missing path)." -Color Yellow -VerboseOnly
             Write-Log "${Description}: '$Path' does not exist."
             $stats.Result = "Skipped"
             $stats.Notes = "Missing"
             return
         }
 
-        Write-Host ""
-        Write-Host ("[+] {0}" -f $Description) -ForegroundColor Cyan
-        Write-Host ("    {0}" -f $Path)
+        Write-Ui ""
+        Write-Ui ("Cleaning {0}..." -f $Description) -Color Cyan
+        Write-Ui ("  {0}" -f $Path) -Color DarkGray -VerboseOnly
 
         $items = @(Get-ChildItem -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue)
         $fileItems = @($items | Where-Object { -not $_.PSIsContainer })
@@ -384,17 +430,15 @@ function Clear-Folder {
         }
 
         if ($stats.Files -eq 0 -and $stats.Folders -eq 0) {
-            Write-Host "    Nothing to remove." -ForegroundColor Yellow
             Write-Log "${Description}: Nothing to remove."
             $stats.Result = if ($Simulate) { "WhatIf" } else { "Skipped" }
             $stats.Notes = "Nothing to remove"
             return
         }
 
-        Write-Host ("    Found {0} files and {1} folders (~{2})." -f $stats.Files, $stats.Folders, (Format-Bytes -Bytes $stats.SizeBytes))
+        Write-Ui ("  {0} files, {1} folders (~{2})." -f $stats.Files, $stats.Folders, (Format-Bytes -Bytes $stats.SizeBytes)) -Color DarkGray -VerboseOnly
 
         if ($Simulate) {
-            Write-Host "    WhatIf: would delete contents." -ForegroundColor Cyan
             Write-Log "${Description}: WhatIf - no deletion performed."
             return
         }
@@ -403,11 +447,18 @@ function Clear-Folder {
         $totalCount = $toDelete.Count
         $processed = 0
         $failedEntries = [System.Collections.Generic.List[pscustomobject]]::new()
+        $progressStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 
         foreach ($entry in $toDelete) {
             $processed++
             $percent = if ($totalCount -eq 0) { 100 } else { [math]::Round(($processed / $totalCount) * 100, 0) }
-            Show-AsciiProgress -Percent $percent -Activity $Description -Status $entry.Name -SilentMode:$SilentMode
+            if (-not $SilentMode) {
+                $shouldUpdate = $processed -eq 1 -or $processed -eq $totalCount -or $processed % 200 -eq 0 -or $progressStopwatch.ElapsedMilliseconds -ge 250
+                if ($shouldUpdate) {
+                    Show-AsciiProgress -Percent $percent -Activity $Description -Status ("{0}/{1}" -f $processed, $totalCount) -SilentMode:$SilentMode
+                    $progressStopwatch.Restart()
+                }
+            }
             try {
                 Remove-Item -LiteralPath $entry.FullName -Recurse -Force -ErrorAction Stop
             }
@@ -422,22 +473,20 @@ function Clear-Folder {
                 }
             }
         }
-        Show-AsciiProgress -Percent 100 -Activity $Description -Status "Completed" -SilentMode:$SilentMode
+        Show-AsciiProgress -Percent 100 -Activity $Description -Status ("{0}/{1}" -f $processed, $totalCount) -SilentMode:$SilentMode
 
         if ($failedEntries.Count -gt 0) {
-            Write-Host ("    Completed with warnings: {0} item(s) locked or in use." -f $failedEntries.Count) -ForegroundColor Yellow
             Write-Log "${Description}: Completed with warnings - $($failedEntries.Count) item(s) skipped."
             $stats.Result = "Partial"
             $stats.Notes = "{0} item(s) locked" -f $failedEntries.Count
         }
         else {
-            Write-Host "    Done." -ForegroundColor Green
             Write-Log "${Description}: Files deleted successfully."
             $stats.Result = "Cleaned"
         }
     }
     catch {
-        Write-Host "    Failed to delete some files." -ForegroundColor Red
+        Write-Ui "Failed to delete some files in $Description." -Color Red
         Write-Log "${Description}: Failed - $($_.Exception.Message)"
         $stats.Result = "Failed"
         $stats.Notes = $_.Exception.Message
@@ -450,9 +499,36 @@ function Clear-Folder {
     }
 }
 
-if ($SkipThumbnails -and $IncludeThumbnails) {
-    throw "Specify either -SkipThumbnails or -IncludeThumbnails, not both."
+function Show-CompletionBanner {
+    param(
+        [long]$FreedBytes,
+        [timespan]$TotalDuration,
+        [int]$WarningCount
+    )
+    $freedLabel = if ($FreedBytes -gt 0) { Format-Bytes -Bytes $FreedBytes } else { "0 MB" }
+    $durationLabel = "{0:N1}s" -f $TotalDuration.TotalSeconds
+    $warnLabel = if ($WarningCount -gt 0) { "$WarningCount warning(s)" } else { "no warnings" }
+    $line = "-------------------------------"
+    Write-Ui ""
+    Write-Ui $line -Color DarkGray
+    Write-Ui ("[OK] Cleanup complete  -  {0}  -  {1}  -  {2}" -f $freedLabel, $durationLabel, $warnLabel) -Color Green
+    Write-Ui $line -Color DarkGray
 }
+
+function Ensure-Admin {
+    if (Test-IsAdministrator) { return }
+    Write-Ui "Requesting administrator privileges..." -Color Yellow
+    $exe = if ($PSVersionTable.PSVersion.Major -ge 6) {
+        Join-Path $PSHOME 'pwsh.exe'
+    } else {
+        Join-Path $PSHOME 'powershell.exe'
+    }
+    $args = @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $PSCommandPath)
+    Start-Process -FilePath $exe -ArgumentList $args -Verb RunAs
+    exit
+}
+
+Ensure-Admin
 
 $settings = Get-Settings -Path $script:ConfigPath
 
@@ -460,6 +536,7 @@ $options = [pscustomobject]@{
     DetailedLog          = $settings.DetailedLog
     SkipThumbnails       = $settings.SkipThumbnails
     IncludeThumbnails    = $settings.IncludeThumbnails
+    WhatIf               = $settings.WhatIf
     Silent               = $settings.Silent
     DisableNotifications = $settings.DisableNotifications
     Preset               = $settings.Preset
@@ -467,40 +544,30 @@ $options = [pscustomobject]@{
     SkipUpdateCheck      = $settings.SkipUpdateCheck
 }
 
-if ($PSBoundParameters.ContainsKey('DetailedLog')) { $options.DetailedLog = [bool]$DetailedLog }
-if ($PSBoundParameters.ContainsKey('SkipThumbnails')) { $options.SkipThumbnails = [bool]$SkipThumbnails; if ($SkipThumbnails) { $options.IncludeThumbnails = $false } }
-if ($PSBoundParameters.ContainsKey('IncludeThumbnails')) { $options.IncludeThumbnails = [bool]$IncludeThumbnails; if ($IncludeThumbnails) { $options.SkipThumbnails = $false } }
-if ($PSBoundParameters.ContainsKey('Silent')) { $options.Silent = [bool]$Silent }
-if ($DisableNotifications) { $options.DisableNotifications = $true }
-if ($SkipUpdateCheck) { $options.SkipUpdateCheck = $true }
-if ($PSBoundParameters.ContainsKey('Preset')) { Set-PresetOptions -Name $Preset -Options $options; $options.Preset = $Preset }
+if ($options.SkipThumbnails -and $options.IncludeThumbnails) {
+    $options.IncludeThumbnails = $false
+    $options.SkipThumbnails = $true
+}
 
-if (-not $options.Silent -and -not $PSBoundParameters.ContainsKey('Preset')) {
-    $menuResult = Invoke-ModeMenu -Options $options
+if (-not $options.Silent) {
+    $menuResult = Invoke-ModeMenu -Options $options -SavedOptions $settings
     $options = $menuResult.Options
     if ($menuResult.SaveDefaults) {
         Save-Settings -Settings $options -Path $script:ConfigPath
     }
 }
 
-if (-not $options.IncludeThumbnails -and -not $options.SkipThumbnails -and $options.Silent) {
-    $options.SkipThumbnails = $true
-}
+$script:IsSilent = $options.Silent
 
 if (-not (Test-IsAdministrator)) {
-    Write-Warning "Administrator privileges are recommended to clean system locations."
+    Write-Ui "Administrator privileges are recommended to clean system locations." -Color Yellow
 }
 
 if (-not (Test-Path -LiteralPath $script:LogRoot)) {
     New-Item -ItemType Directory -Path $script:LogRoot -Force | Out-Null
 }
 
-if (-not $LogFile) {
-    $LogFile = Join-Path $script:LogRoot ("cleanup_{0}.log" -f $script:RunTimestamp)
-}
-elseif (-not [System.IO.Path]::IsPathRooted($LogFile)) {
-    $LogFile = Join-Path $script:AppRoot $LogFile
-}
+$LogFile = Join-Path $script:LogRoot ("cleanup_{0}.log" -f $script:RunTimestamp)
 $script:ActiveLogFile = $LogFile
 
 Show-Header
@@ -514,8 +581,13 @@ Write-Log "Running as user: $env:USERNAME"
 Write-Log "Options: $(($options | ConvertTo-Json -Depth 3))"
 Write-Log "----------------------------------------"
 
-Write-Host "Cleanup started at $(Get-Date)"
-Write-Host ""
+Write-Ui ("Cleanup started at {0}" -f (Get-Date)) -Color DarkGray -VerboseOnly
+if (-not $options.Silent) {
+    $thumbLabel = if ($options.IncludeThumbnails) { "include" } elseif ($options.SkipThumbnails) { "skip" } else { "prompt" }
+    $logLabel = if ($options.DetailedLog) { "detailed" } else { "standard" }
+    $runLabel = if ($options.WhatIf) { "dry run" } else { "live" }
+    Write-Ui ("Mode: {0} | Thumbnails: {1} | Log: {2} | Run: {3}" -f $options.Preset, $thumbLabel, $logLabel, $runLabel) -Color DarkGray
+}
 
 $targets = @(
     @{ Path = $env:TEMP;                                     Desc = "User Temp Files" },
@@ -526,71 +598,77 @@ $targets = @(
 )
 
 foreach ($t in $targets) {
-    Clear-Folder -Path $t.Path -Description $t.Desc -Simulate:$WhatIf -DetailedLog:$options.DetailedLog -SilentMode:$options.Silent
+    Clear-Folder -Path $t.Path -Description $t.Desc -Simulate:$options.WhatIf -DetailedLog:$options.DetailedLog -SilentMode:$options.Silent
 }
 
-Write-Host ""
+Write-Ui ""
 $cleanThumbs = $false
 if ($options.IncludeThumbnails) {
     $cleanThumbs = $true
 }
 elseif ($options.SkipThumbnails) {
     Write-Log "Thumbnail Cache: Skipped by preference."
+    Write-Ui "Thumbnail cache skipped." -Color DarkGray -VerboseOnly
 }
 elseif (-not $options.Silent) {
-    $clearThumbs = Read-Host "Do you want to clear the Explorer thumbnail cache? (Y/N) [Deletes cached preview images and may restart Explorer]"
+    $clearThumbs = Read-Host "Clear the Explorer thumbnail cache? (Y/N) [May restart Explorer]"
     if ($clearThumbs -match '^[Yy]') {
         $cleanThumbs = $true
     }
 }
 
 if ($cleanThumbs) {
-    Write-Host ""
-    if ($WhatIf) {
-        Write-Host "WhatIf: would stop Explorer..." -ForegroundColor Cyan
+    Write-Ui ""
+    if ($options.WhatIf) {
+        Write-Ui "WhatIf: would stop Explorer..." -Color Cyan
         Write-Log "Thumbnail Cache: WhatIf - Explorer not stopped."
     }
     else {
-        Write-Host "Stopping Explorer..."
+        Write-Ui "Stopping Explorer..." -Color DarkGray
         Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue
     }
 
-    Clear-Folder -Path "$env:LOCALAPPDATA\Microsoft\Windows\Explorer" -Description "Thumbnail Cache" -Simulate:$WhatIf -DetailedLog:$options.DetailedLog -SilentMode:$options.Silent
+    Clear-Folder -Path "$env:LOCALAPPDATA\Microsoft\Windows\Explorer" -Description "Thumbnail Cache" -Simulate:$options.WhatIf -DetailedLog:$options.DetailedLog -SilentMode:$options.Silent
 
-    if ($WhatIf) {
-        Write-Host "WhatIf: would restart Explorer..." -ForegroundColor Cyan
+    if ($options.WhatIf) {
+        Write-Ui "WhatIf: would restart Explorer..." -Color Cyan
         Write-Log "Thumbnail Cache: WhatIf - Explorer not restarted."
     }
     else {
-        Write-Host "Restarting Explorer..."
+        Write-Ui "Restarting Explorer..." -Color DarkGray
         Start-Process explorer.exe | Out-Null
     }
 }
 
 if ($script:RunStats.Count -gt 0) {
-    Write-Host ""
-    Write-Host "============= Summary =============" -ForegroundColor Cyan
-    $script:RunStats |
-        Select-Object Description, Result, Files, Folders, @{Name="Size";Expression={ Format-Bytes -Bytes $_.SizeBytes }} |
-        Format-Table -AutoSize
-
     $freedBytes = ($script:RunStats | Measure-Object -Property FreedBytes -Sum).Sum
+    $totalSeconds = ($script:RunStats | ForEach-Object { $_.Duration.TotalSeconds } | Measure-Object -Sum).Sum
+    $totalDuration = [timespan]::FromSeconds($totalSeconds)
+    $warningCount = ($script:RunStats | Where-Object { $_.Result -in @('Partial','Failed') }).Count
     if ($freedBytes -gt 0) {
-        Write-Host ("Estimated space freed: {0}" -f (Format-Bytes -Bytes $freedBytes)) -ForegroundColor Green
+        Write-Ui ("Total freed: {0}" -f (Format-Bytes -Bytes $freedBytes)) -Color Green
+    }
+
+    if (-not $script:IsSilent -and $VerbosePreference -ne 'SilentlyContinue') {
+        Write-Ui ""
+        Write-Ui "Summary" -Color Cyan
+        $script:RunStats |
+            Select-Object Description, Result, Files, Folders, @{Name="Size";Expression={ Format-Bytes -Bytes $_.SizeBytes }} |
+            Format-Table -AutoSize
     }
 }
 
 Write-Log "Cleanup completed at $(Get-Date)"
-Write-Host ""
-Write-Host ("Cleanup completed. Log: {0}" -f $LogFile)
+Write-Ui ""
+Write-Ui ("Cleanup completed. Log: {0}" -f $LogFile)
 
-if (-not $options.DisableNotifications) {
-    $freedBytes = ($script:RunStats | Measure-Object -Property FreedBytes -Sum).Sum
+if (-not $options.DisableNotifications -and $script:RunStats.Count -gt 0) {
     $msg = if ($freedBytes -gt 0) { "Freed $(Format-Bytes -Bytes $freedBytes)" } else { "Cleanup run finished." }
     Send-Notification -Title "TempCleaner" -Message $msg -SilentMode:$options.Silent
+    Show-CompletionBanner -FreedBytes $freedBytes -TotalDuration $totalDuration -WarningCount $warningCount
 }
 
 if (-not $options.Silent) {
-    Write-Host "Press any key to exit..."
+    Write-Ui "Press any key to exit..."
     [void][System.Console]::ReadKey($true)
 }
