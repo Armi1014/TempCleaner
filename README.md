@@ -1,7 +1,7 @@
 ## 🧹 TempCleaner v0.5.0 – PowerShell temp cleaner for Windows
 
 Fast, offline, telemetry-free temp/cache cleaner for Windows.  
-Unzip it, run `Run-TempCleaner.bat`, pick a preset, done.
+Unzip it, run `Run-TempCleaner.bat` (launcher for `TempCleaner.ps1`), pick a preset, done.
 
 - 🧠 **Presets**: `Basic`, `Full`, or `Custom`
 - 📦 **Cleans**: user + system temp, Windows Update cache, minidumps, optional Explorer `thumbcache*.db`
@@ -13,5 +13,5 @@ Unzip it, run `Run-TempCleaner.bat`, pick a preset, done.
 ### ⚡ Quick start
 
 1. Download and extract the ZIP.
-2. Double-click `Run-TempCleaner.bat` (uses PowerShell 7 if installed, otherwise Windows PowerShell).
+2. Double-click `Run-TempCleaner.bat` (it launches `TempCleaner.ps1` with PowerShell 7 if installed, otherwise Windows PowerShell).
 3. Accept the elevation prompt, then pick **Basic / Full / Custom** and confirm cleanup. (Logs are saved under `logs/`.)
