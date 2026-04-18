@@ -1,0 +1,38 @@
+name: Pester
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  test:
+    name: Run Pester tests
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Pester
+        shell: pwsh
+        run: |
+          $requiredVersion = [version]'3.4.0'
+          $installed = Get-Module -ListAvailable Pester |
+            Where-Object { $_.Version -eq $requiredVersion } |
+            Select-Object -First 1
+
+          if (-not $installed) {
+            Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+            Install-Module -Name Pester -RequiredVersion $requiredVersion -Scope CurrentUser -Force -SkipPublisherCheck
+          }
+
+      - name: Run tests
+        shell: pwsh
+        run: |
+          Import-Module Pester -RequiredVersion 3.4.0 -Force
+          $result = Invoke-Pester -Script '.\tests\TempCleaner.Tests.ps1' -PassThru
+          if ($result.FailedCount -gt 0) {
+            exit 1
+          }

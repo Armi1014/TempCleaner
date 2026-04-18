@@ -41,7 +41,7 @@ $script:ActiveLogFile = $null
 $script:IsSilent = $false
 $script:AllowedCleanupRoots = @()
 $script:CliBoundParameters = @{} + $PSBoundParameters
-$script:Version = [version]'0.5.0'
+$script:Version = [version]'0.6.0'
 $script:PendingLogMessages = [System.Collections.Generic.List[string]]::new()
 
 function Write-LogPending {
@@ -247,7 +247,7 @@ function Test-IsAdministrator {
 }
 
 function Get-AppVersion {
-    $fallbackVersion = [version]'0.5.0'
+    $fallbackVersion = [version]'0.6.0'
     try {
         if (-not (Test-Path -LiteralPath $script:VersionFile)) {
             return $fallbackVersion
