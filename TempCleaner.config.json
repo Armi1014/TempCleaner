@@ -1,0 +1,19 @@
+{
+  "DetailedLog": false,
+  "DetailedLogLimit": 5000,
+  "SkipThumbnails": true,
+  "IncludeThumbnails": false,
+  "WhatIf": false,
+  "Silent": false,
+  "DisableNotifications": false,
+  "Preset": "Basic",
+  "UpdateFeed": "https://raw.githubusercontent.com/ardai/TempCleaner/main/version.json",
+  "SkipUpdateCheck": true,
+  "UpdateTimeoutSec": 5,
+  "UserOnly": false,
+  "IncludeDirectXShaderCache": false,
+  "IncludeDeliveryOptimizationCache": false,
+  "IncludeWindowsErrorReporting": false,
+  "LogRetentionCount": 30,
+  "LogRetentionDays": 14
+}
