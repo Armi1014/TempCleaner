@@ -1105,7 +1105,7 @@ function Show-DeletionPreview {
     if ($SkipConfirmation) { return $true }
     if ($Simulate) {
         Write-Ui ""
-        Write-Ui " Dry-run preview only — no files will be deleted." -Color Cyan
+        Write-Ui " Dry-run preview only - no files will be deleted." -Color Cyan
         return $true
     }
     Write-Ui ""
