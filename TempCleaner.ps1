@@ -103,7 +103,7 @@ function Invoke-LogRotation {
             $result.Deleted++
         }
         catch {
-            # Rotation must never throw — leave the file in place if removal fails.
+            # If removal fails, leave the file in place and continue without throwing.
         }
     }
     $result.Kept = $kept
